@@ -6,7 +6,8 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 # ctranslate2 (faster-whisper) dlopens cuBLAS 12 and cuDNN 9; the pip wheels are the documented way
 # to provide them, and entrypoint.sh puts their lib dirs on LD_LIBRARY_PATH.
-RUN pip install --no-cache-dir "faster-whisper==1.*" "pyannote.audio==3.3.2" \
+# huggingface_hub 1.x dropped the use_auth_token kwarg that pyannote 3.3 still passes; pin below 1.0.
+RUN pip install --no-cache-dir "faster-whisper==1.*" "pyannote.audio==3.3.2" "huggingface_hub<1.0" \
       "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
 WORKDIR /app
 COPY worker.py entrypoint.sh /app/
