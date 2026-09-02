@@ -44,6 +44,46 @@ def ffmpeg_exe():
     import imageio_ffmpeg  # pip install imageio-ffmpeg (Windows box without a system ffmpeg)
     return imageio_ffmpeg.get_ffmpeg_exe()
 
+def _hls_segments(playlist_url):
+    """Resolve an HLS master or media playlist to its ordered list of segment URLs."""
+    import urllib.parse
+    def lines(url):
+        text = urllib.request.urlopen(url, timeout=60).read().decode("utf-8", "replace")
+        return [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
+    first = lines(playlist_url)
+    if not first: raise RuntimeError("empty playlist")
+    if first[0].split("?")[0].endswith(".m3u8"):             # master -> first rendition
+        media = urllib.parse.urljoin(playlist_url, first[0])
+        return [urllib.parse.urljoin(media, l) for l in lines(media)]
+    return [urllib.parse.urljoin(playlist_url, l) for l in first]
+
+def fetch_hls_parallel(playlist_url, out, heartbeat=None, workers=8):
+    """Download every segment with a thread pool (the host serves one segment in ~0.5 s however
+    small it is, so 8 in flight is ~6x faster than ffmpeg's one-at-a-time), concatenate them in
+    order, then let ffmpeg turn the result into 16 kHz mono WAV."""
+    from concurrent.futures import ThreadPoolExecutor
+    segs = _hls_segments(playlist_url)
+    def get(u):
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(u, timeout=60) as r: return r.read()
+            except Exception as e:
+                if attempt == 3: raise
+                time.sleep(1 + attempt)
+    raw = out + ".hls"
+    with open(raw, "wb") as f, ThreadPoolExecutor(max_workers=workers) as ex:
+        beat = time.time()
+        for data in ex.map(get, segs):                       # map keeps segment order
+            f.write(data)
+            if heartbeat and time.time() - beat > 60:
+                try: heartbeat(f.tell())
+                except Exception as e: print("heartbeat during fetch failed:", e, flush=True)
+                beat = time.time()
+    subprocess.check_call([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", raw,
+                           "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
+    os.remove(raw)
+    return len(segs)
+
 def fetch_wav(stream_url, out, heartbeat=None):
     """16 kHz mono WAV from the HLS stream. Wowza serves an audio-only rendition of the same
     recording (?wowzaaudioonly) that is a fraction of the size of the 720p video; try it first and
@@ -51,6 +91,14 @@ def fetch_wav(stream_url, out, heartbeat=None):
     urls = [stream_url]
     if "playlist.m3u8" in stream_url and "?" not in stream_url:
         urls.insert(0, stream_url + "?wowzaaudioonly")
+    for u in urls:
+        try:
+            n = fetch_hls_parallel(u, out, heartbeat)
+            if os.path.getsize(out) > 1_000_000:
+                print(f"fetched {n} HLS segments in parallel from {u.split('?')[-1] if '?' in u else 'video playlist'}", flush=True)
+                return
+        except Exception as e:
+            print(f"parallel HLS fetch failed ({e}); falling back to ffmpeg", flush=True)
     last = None
     for u in urls:
         proc = subprocess.Popen([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", u,
