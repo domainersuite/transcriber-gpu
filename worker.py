@@ -84,10 +84,33 @@ def fetch_hls_parallel(playlist_url, out, heartbeat=None, workers=8):
     os.remove(raw)
     return len(segs)
 
-def fetch_wav(stream_url, out, heartbeat=None):
-    """16 kHz mono WAV from the HLS stream. Wowza serves an audio-only rendition of the same
-    recording (?wowzaaudioonly) that is a fraction of the size of the 720p video; try it first and
-    fall back to the video playlist if the host does not offer it."""
+def fetch_file(url, out, heartbeat=None):
+    """Plain GET of a mirrored audio file (our own object store), then ffmpeg to 16 kHz mono WAV."""
+    raw = out + ".src"
+    beat = time.time()
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "trust-transcriber/2"}), timeout=120) as r, open(raw, "wb") as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk: break
+            f.write(chunk)
+            if heartbeat and time.time() - beat > 60:
+                try: heartbeat(f.tell())
+                except Exception as e: print("heartbeat during fetch failed:", e, flush=True)
+                beat = time.time()
+    subprocess.check_call([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", raw, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
+    os.remove(raw)
+
+def fetch_wav(stream_url, out, heartbeat=None, audio_url=None):
+    """16 kHz mono WAV. Prefer the mirrored audio file (audio_url: our object store, no load on
+    the Trust's host); else the host's audio-only HLS rendition (?wowzaaudioonly), fetched in
+    parallel; else ffmpeg on the video playlist."""
+    if audio_url:
+        try:
+            fetch_file(audio_url, out, heartbeat)
+            if os.path.getsize(out) > 1_000_000:
+                print(f"fetched mirrored audio from {audio_url.split('/')[2]}", flush=True); return
+        except Exception as e:
+            print(f"mirror fetch failed ({e}); falling back to the host", flush=True)
     urls = [stream_url]
     if "playlist.m3u8" in stream_url and "?" not in stream_url:
         urls.insert(0, stream_url + "?wowzaaudioonly")
@@ -223,7 +246,8 @@ def transcribe(job, args, server, token):
         wav = os.path.join(td, rec["recordingId"] + ".wav")
         log(f"fetching {rec['recordingId']} …")
         fetch_wav(rec["streamUrl"], wav, heartbeat=lambda nbytes: http(server, token, "POST",
-                  f"/api/transcriber/jobs/{job['id']}/heartbeat", {"progressS": 0, "fetchedBytes": nbytes}))
+                  f"/api/transcriber/jobs/{job['id']}/heartbeat", {"progressS": 0, "fetchedBytes": nbytes}),
+                  audio_url=rec.get("audioUrl"))
         duration = wav_duration(wav)
         log(f"{duration/3600:.2f} h of audio; model {args.model} on {args.device}; diarize={args.diarize}")
         http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/heartbeat",
