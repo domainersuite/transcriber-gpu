@@ -253,7 +253,24 @@ def split_by_voice(seg, offset, voices):
 
 # ── one job ──────────────────────────────────────────────────────────────────
 
+def vision_job(job, args, server, token):
+    """A 'vision' pass: sample the video, read the name tag on the outlined Zoom tile, post sightings."""
+    import vision
+    rec = job["recording"]
+    log = lambda m: print(f"[{job['id']}] {m}", flush=True)
+    http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/heartbeat", {"progressS": 0, "model": "vision/tesseract"})
+    found = vision.sightings(rec["streamUrl"], ffmpeg_exe(), log,
+                             heartbeat=lambda done, total: http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/heartbeat",
+                                                               {"progressS": int(60 * done)}))
+    for i in range(0, len(found), 200):
+        http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/sightings",
+             {"sightings": [{"t": t, "text": text} for t, text in found[i:i + 200]]})
+    http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/complete", {"model": "vision/tesseract", "segmentCount": 0})
+    log(f"vision done: {len(found)} sightings")
+
 def transcribe(job, args, server, token):
+    if job.get("pass") == "vision":
+        return vision_job(job, args, server, token)
     rec = job["recording"]
     log = lambda m: print(f"[{job['id']}] {m}", flush=True)
     with tempfile.TemporaryDirectory() as td:
@@ -318,7 +335,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default=env("TRANSCRIBER_SERVER", "http://localhost:5000"))
     ap.add_argument("--model", default=env("WHISPER_MODEL", "small.en"))
-    ap.add_argument("--pass", dest="pass_", default=env("TRANSCRIBER_PASS", "fast"), choices=["fast", "final", "any"])
+    ap.add_argument("--pass", dest="pass_", default=env("TRANSCRIBER_PASS", "fast"), choices=["fast", "final", "vision", "any"])
     ap.add_argument("--threads", type=int, default=int(env("WHISPER_THREADS", "2")))
     ap.add_argument("--beam", type=int, default=int(env("WHISPER_BEAM", "1")))
     ap.add_argument("--device", default=env("WHISPER_DEVICE", "cpu")); ap.add_argument("--compute-type", default=env("WHISPER_COMPUTE", "int8"))
