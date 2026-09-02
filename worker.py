@@ -3,7 +3,7 @@
 The server owns the queue and the data (migrations/0108 + 0109, server/meetingTranscripts.ts). This
 process only needs: the server URL, TRANSCRIBER_TOKEN, ffmpeg, and faster-whisper. It runs
 unchanged on the droplet (compose service `transcriber`, small.en, nice 19), on a laptop
-(medium.en) or on a rented GPU pod (Dockerfile.gpu: large-v3 + pyannote diarization) — whichever
+(medium.en) or on a rented GPU pod (ghcr.io/domainersuite/transcriber-gpu: large-v3 + pyannote diarization) — whichever
 claims a job first does it.
 
   python worker.py --server https://abolishislandstrust.org --model small.en --pass fast --loop
