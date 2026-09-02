@@ -45,8 +45,21 @@ def ffmpeg_exe():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 def fetch_wav(stream_url, out):
-    subprocess.check_call([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", stream_url,
-                           "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
+    """16 kHz mono WAV from the HLS stream. Wowza serves an audio-only rendition of the same
+    recording (?wowzaaudioonly) that is a fraction of the size of the 720p video; try it first and
+    fall back to the video playlist if the host does not offer it."""
+    urls = [stream_url]
+    if "playlist.m3u8" in stream_url and "?" not in stream_url:
+        urls.insert(0, stream_url + "?wowzaaudioonly")
+    last = None
+    for u in urls:
+        try:
+            subprocess.check_call([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", u,
+                                   "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
+            if os.path.getsize(out) > 1_000_000: return
+        except subprocess.CalledProcessError as e:
+            last = e
+    if last: raise last
 
 def wav_duration(path):
     import wave
