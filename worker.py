@@ -23,17 +23,31 @@ WHISPER_THREADS / TRANSCRIBER_PASS / TRANSCRIBER_DIARIZE / TRANSCRIBER_IDLE_EXIT
 """
 import argparse, bisect, json, os, socket, subprocess, sys, tempfile, time, types, urllib.request, urllib.error
 
+RETRY_S = (5, 10, 20, 40, 60, 60, 60, 60)   # ~5 minutes: long enough to ride out a deploy of the server
+
 def http(server, token, method, path, body=None, timeout=120):
+    """One request to the queue server. A connection failure or a 5xx (the server is being
+    redeployed, a proxy hiccup) is retried with backoff for about five minutes rather than
+    abandoning a half-finished job; a 4xx is a real answer and is raised at once."""
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(server.rstrip("/") + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json", "x-worker-token": token,
-                                          "User-Agent": "trust-transcriber/2"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
-            return json.loads(raw) if raw else None
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"{method} {path} -> {e.code}: {e.read()[:300]!r}")
+    last = None
+    for attempt, wait in enumerate(RETRY_S + (None,)):
+        req = urllib.request.Request(server.rstrip("/") + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", "x-worker-token": token,
+                                              "User-Agent": "trust-transcriber/2"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            if e.code < 500: raise RuntimeError(f"{method} {path} -> {e.code}: {e.read()[:300]!r}")
+            last = RuntimeError(f"{method} {path} -> {e.code}")
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            last = RuntimeError(f"{method} {path} -> {e}")
+        if wait is None: break
+        print(f"{last}; retrying in {wait}s", flush=True)
+        time.sleep(wait)
+    raise last
 
 def ffmpeg_exe():
     if os.environ.get("FFMPEG"): return os.environ["FFMPEG"]
