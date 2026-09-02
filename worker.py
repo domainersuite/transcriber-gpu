@@ -44,7 +44,7 @@ def ffmpeg_exe():
     import imageio_ffmpeg  # pip install imageio-ffmpeg (Windows box without a system ffmpeg)
     return imageio_ffmpeg.get_ffmpeg_exe()
 
-def fetch_wav(stream_url, out):
+def fetch_wav(stream_url, out, heartbeat=None):
     """16 kHz mono WAV from the HLS stream. Wowza serves an audio-only rendition of the same
     recording (?wowzaaudioonly) that is a fraction of the size of the 720p video; try it first and
     fall back to the video playlist if the host does not offer it."""
@@ -53,12 +53,19 @@ def fetch_wav(stream_url, out):
         urls.insert(0, stream_url + "?wowzaaudioonly")
     last = None
     for u in urls:
-        try:
-            subprocess.check_call([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", u,
-                                   "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
-            if os.path.getsize(out) > 1_000_000: return
-        except subprocess.CalledProcessError as e:
-            last = e
+        proc = subprocess.Popen([ffmpeg_exe(), "-loglevel", "error", "-y", "-i", u,
+                                 "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", out])
+        beat = time.time()
+        while proc.poll() is None:
+            time.sleep(5)
+            # The host serves HLS at only a few times real time; a long meeting takes many minutes
+            # to fetch, and a silent worker is requeued after 30. Say we are alive while we wait.
+            if heartbeat and time.time() - beat > 60:
+                try: heartbeat(os.path.getsize(out) if os.path.exists(out) else 0)
+                except Exception as e: print("heartbeat during fetch failed:", e, flush=True)
+                beat = time.time()
+        if proc.returncode == 0 and os.path.getsize(out) > 1_000_000: return
+        last = subprocess.CalledProcessError(proc.returncode, "ffmpeg")
     if last: raise last
 
 def wav_duration(path):
@@ -167,7 +174,8 @@ def transcribe(job, args, server, token):
     with tempfile.TemporaryDirectory() as td:
         wav = os.path.join(td, rec["recordingId"] + ".wav")
         log(f"fetching {rec['recordingId']} …")
-        fetch_wav(rec["streamUrl"], wav)
+        fetch_wav(rec["streamUrl"], wav, heartbeat=lambda nbytes: http(server, token, "POST",
+                  f"/api/transcriber/jobs/{job['id']}/heartbeat", {"progressS": 0, "fetchedBytes": nbytes}))
         duration = wav_duration(wav)
         log(f"{duration/3600:.2f} h of audio; model {args.model} on {args.device}; diarize={args.diarize}")
         http(server, token, "POST", f"/api/transcriber/jobs/{job['id']}/heartbeat",
